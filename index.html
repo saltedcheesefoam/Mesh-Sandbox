@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Cloth</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        canvas { background-color: #000; margin-top: 10px; border-radius: 8px; box-shadow: 0 0 20px rgba(0, 255, 150, 0.15); cursor: crosshair; }
+        .controls-container { margin-top: 15px; display: flex; flex-direction: column; align-items: center; gap: 15px; background: #222; padding: 15px 25px; border-radius: 8px; border: 1px solid #333; }
+        .controls-row { display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; align-items: center; }
+        button, select { background: #111; color: #0f0; border: 1px solid #0f0; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: all 0.2s; }
+        button:hover, select:hover { background: #0f0; color: #000; }
+        .slider-group { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+        input[type="range"], input[type="checkbox"] { cursor: pointer; }
+        p { font-size: 13px; color: #888; margin-top: 10px; margin-bottom: 0; }
+    </style>
+</head>
+<body>
+
+    <div class="controls-container">
+        <div class="controls-row">
+            <div class="slider-group">
+                <label for="strengthSlider">Press Strength:</label>
+                <input type="range" id="strengthSlider" min="1" max="20" value="8">
+            </div>
+            <div class="slider-group">
+                <input type="checkbox" id="chargeToggle">
+                <label for="chargeToggle">Hold to build pressure</label>
+            </div>
+            <div class="slider-group">
+                <label for="densitySelect">Mesh Density:</label>
+                <select id="densitySelect" onchange="changeDensity()">
+                    <option value="low">Low (30x20)</option>
+                    <option value="med" selected>Medium (60x40)</option>
+                    <option value="high">High (90x60)</option>
+                    <option value="extreme">Extreme (120x80)</option>
+                    <option value="super" style="color: #ff4444;">Super Extreme (Lag Warning!)</option>
+                    <option value="crusher" style="color: #ff00ea; font-weight: bold;">Theoretical Limit (PC Crusher)</option>
+                </select>
+            </div>
+        </div>
+        <div class="controls-row">
+            <button onclick="disturbRipple()">Ripple</button>
+            <button onclick="disturbBlast()">Blast Center</button>
+            <button onclick="disturbNoise()">Noise</button>
+            <button onclick="resetMesh()" style="border-color: #f00; color: #f00;">Reset (R)</button>
+        </div>
+    </div>
+    
+    <canvas id="meshCanvas" width="900" height="600"></canvas>
+    <p>Everything is stable. Use R to reset at any time.</p>
+
+    <script>
+        const canvas = document.getElementById("meshCanvas");
+        const ctx = canvas.getContext("2d");
+
+        let cols = 60; 
+        let rows = 40;
+        let spacing = 14; 
+        const friction = 0.92; 
+        const constraintIterations = 5; 
+
+        let mouse = { x: -1000, y: -1000, isDown: false, radius: 80 };
+        let pressCharge = 0; 
+        const maxCharge = 30; 
+
+        let particles = [];
+        let constraints = [];
+
+        class Particle {
+            constructor(x, y, pinned) {
+                this.x = x; this.y = y; this.oldX = x; this.oldY = y; this.pinned = pinned;
+            }
+            update() {
+                if (this.pinned) return;
+                let vx = (this.x - this.oldX) * friction;
+                let vy = (this.y - this.oldY) * friction;
+                this.oldX = this.x; this.oldY = this.y;
+                this.x += vx; this.y += vy;
+            }
+        }
+
+        class Constraint {
+            constructor(p1, p2, restLength) {
+                this.p1 = p1; this.p2 = p2; this.restLength = restLength;
+            }
+            resolve() {
+                let dx = this.p2.x - this.p1.x;
+                let dy = this.p2.y - this.p1.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist === 0) return;
+                let diff = (this.restLength - dist) / dist;
+                let offsetX = dx * diff * 0.5;
+                let offsetY = dy * diff * 0.5;
+                if (!this.p1.pinned) { this.p1.x -= offsetX; this.p1.y -= offsetY; }
+                if (!this.p2.pinned) { this.p2.x += offsetX; this.p2.y += offsetY; }
+            }
+        }
+
+        function initMesh() {
+            particles = [];
+            constraints = [];
+            pressCharge = 0;
+
+            let gridWidth = canvas.width * 0.95;
+            let gridHeight = canvas.height * 0.95;
+            spacing = Math.min(gridWidth / cols, gridHeight / rows);
+            
+            let startX = (canvas.width - (cols * spacing)) / 2 + (spacing / 2);
+            let startY = (canvas.height - (rows * spacing)) / 2 + (spacing / 2);
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    let isPinned = (x === 0 || x === cols - 1 || y === 0 || y === rows - 1);
+                    particles.push(new Particle(startX + x * spacing, startY + y * spacing, isPinned));
+                }
+            }
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    let index = y * cols + x;
+                    if (x < cols - 1) constraints.push(new Constraint(particles[index], particles[index + 1], spacing));
+                    if (y < rows - 1) constraints.push(new Constraint(particles[index], particles[index + cols], spacing));
+                }
+            }
+        }
+
+        function changeDensity() {
+            const density = document.getElementById("densitySelect").value;
+            if (density === "low") { cols = 30; rows = 20; }
+            else if (density === "med") { cols = 60; rows = 40; }
+            else if (density === "high") { cols = 90; rows = 60; }
+            else if (density === "extreme") { cols = 120; rows = 80; }
+            else if (density === "super") { 
+                alert("WARNING: Super Extreme mode will generate over 44,000 points and nearly 90,000 constraints! Proceed at your own risk!");
+                cols = 260; rows = 170; 
+            }
+            else if (density === "crusher") { 
+                alert("FINAL WARNING: Initiating 250,000 particles (500x500). Browser will freeze during generation. Good luck!");
+                cols = 500; rows = 500; 
+            }
+            initMesh();
+        }
+
+        function applyMousePress() {
+            if (!mouse.isDown) { pressCharge = 0; return; }
+            const strengthSlider = document.getElementById("strengthSlider").value;
+            const useCharge = document.getElementById("chargeToggle").checked;
+            if (useCharge) { if (pressCharge < maxCharge) pressCharge++; } else { pressCharge = maxCharge; }
+            let activeForce = parseFloat(strengthSlider) * (pressCharge / maxCharge);
+
+            particles.forEach(p => {
+                if (p.pinned) return;
+                let dx = p.x - mouse.x;
+                let dy = p.y - mouse.y;
+                let distSq = dx * dx + dy * dy;
+                if (distSq < mouse.radius * mouse.radius) {
+                    let dist = Math.sqrt(distSq);
+                    let pushFactor = (mouse.radius - dist) / mouse.radius;
+                    p.oldX = p.x - (dx / dist) * pushFactor * activeForce;
+                    p.oldY = p.y - (dy / dist) * pushFactor * activeForce;
+                }
+            });
+        }
+
+        function disturbBlast() {
+            let cx = canvas.width / 2, cy = canvas.height / 2;
+            particles.forEach(p => {
+                if (p.pinned) return;
+                let dx = p.x - cx, dy = p.y - cy;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 150) { p.oldX = p.x - (dx / dist) * 25; p.oldY = p.y - (dy / dist) * 25; }
+            });
+        }
+
+        function disturbRipple() {
+            let cx = canvas.width / 2, cy = canvas.height / 2;
+            particles.forEach(p => {
+                if (p.pinned) return;
+                let dx = p.x - cx, dy = p.y - cy;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                p.oldY = p.y + Math.sin(dist * 0.05) * 12;
+            });
+        }
+
+        function disturbNoise() {
+            particles.forEach(p => { if (!p.pinned) { p.oldX = p.x + (Math.random() - 0.5) * 15; p.oldY = p.y + (Math.random() - 0.5) * 15; } });
+        }
+
+        function resetMesh() { initMesh(); }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            applyMousePress();
+            particles.forEach(p => p.update());
+            for (let i = 0; i < constraintIterations; i++) { constraints.forEach(c => c.resolve()); }
+            ctx.beginPath();
+            ctx.strokeStyle = "rgba(0, 255, 150, 0.4)";
+            ctx.lineWidth = 1;
+            constraints.forEach(c => { ctx.moveTo(c.p1.x, c.p1.y); ctx.lineTo(c.p2.x, c.p2.y); });
+            ctx.stroke();
+            requestAnimationFrame(render);
+        }
+
+        function updateMousePos(e) {
+            let rect = canvas.getBoundingClientRect();
+            mouse.x = e.clientX - rect.left;
+            mouse.y = e.clientY - rect.top;
+        }
+
+        canvas.addEventListener("mousedown", (e) => { mouse.isDown = true; updateMousePos(e); });
+        window.addEventListener("mouseup", () => { mouse.isDown = false; });
+        canvas.addEventListener("mousemove", (e) => { updateMousePos(e); });
+        canvas.addEventListener("mouseleave", () => { mouse.isDown = false; });
+        window.addEventListener("keydown", (e) => { if (e.key.toLowerCase() === 'r') resetMesh(); });
+
+        initMesh();
+        render();
+    </script>
+</body>
+</html>
